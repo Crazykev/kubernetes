@@ -22,6 +22,5 @@ const (
 
 	// different container runtimes
 	DockerContainerRuntime = "docker"
-	RktContainerRuntime    = "rkt"
 	RemoteContainerRuntime = "remote"
 )

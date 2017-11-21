@@ -37,8 +37,6 @@ func (i *imageFsInfoProvider) ImageFsInfoLabel() (string, error) {
 	switch i.runtime {
 	case "docker":
 		return cadvisorfs.LabelDockerImages, nil
-	case "rkt":
-		return cadvisorfs.LabelRktImages, nil
 	case "remote":
 		// This is a temporary workaround to get stats for cri-o from cadvisor
 		// and should be removed.

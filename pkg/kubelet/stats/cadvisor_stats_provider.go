@@ -35,7 +35,7 @@ import (
 )
 
 // cadvisorStatsProvider implements the containerStatsProvider interface by
-// getting the container stats from cAdvisor. This is needed by docker and rkt
+// getting the container stats from cAdvisor. This is needed by docker
 // integrations since they do not provide stats from CRI.
 type cadvisorStatsProvider struct {
 	// cadvisor is used to get the stats of the cgroup for the containers that

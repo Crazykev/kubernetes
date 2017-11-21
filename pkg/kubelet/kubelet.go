@@ -88,7 +88,6 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/prober"
 	proberesults "k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/kubelet/remote"
-	"k8s.io/kubernetes/pkg/kubelet/rkt"
 	"k8s.io/kubernetes/pkg/kubelet/secret"
 	"k8s.io/kubernetes/pkg/kubelet/server"
 	serverstats "k8s.io/kubernetes/pkg/kubelet/server/stats"
@@ -592,150 +591,109 @@ func NewMainKubelet(kubeCfg *kubeletconfiginternal.KubeletConfiguration,
 	var nl *NoOpLegacyHost
 	pluginSettings.LegacyRuntimeHost = nl
 
-	// rktnetes cannot be run with CRI.
-	if kubeCfg.ContainerRuntime != kubetypes.RktContainerRuntime {
-		// kubelet defers to the runtime shim to setup networking. Setting
-		// this to nil will prevent it from trying to invoke the plugin.
-		// It's easier to always probe and initialize plugins till cri
-		// becomes the default.
-		klet.networkPlugin = nil
-		// if left at nil, that means it is unneeded
-		var legacyLogProvider kuberuntime.LegacyLogProvider
+	// kubelet defers to the runtime shim to setup networking. Setting
+	// this to nil will prevent it from trying to invoke the plugin.
+	// It's easier to always probe and initialize plugins till cri
+	// becomes the default.
+	klet.networkPlugin = nil
+	// if left at nil, that means it is unneeded
+	var legacyLogProvider kuberuntime.LegacyLogProvider
 
-		switch kubeCfg.ContainerRuntime {
-		case kubetypes.DockerContainerRuntime:
-			// Create and start the CRI shim running as a grpc server.
-			streamingConfig := getStreamingConfig(kubeCfg, kubeDeps)
-			ds, err := dockershim.NewDockerService(kubeDeps.DockerClient, crOptions.PodSandboxImage, streamingConfig,
-				&pluginSettings, kubeCfg.RuntimeCgroups, kubeCfg.CgroupDriver, crOptions.DockershimRootDirectory,
-				crOptions.DockerDisableSharedPID)
-			if err != nil {
-				return nil, err
-			}
-			if err := ds.Start(); err != nil {
-				return nil, err
-			}
-			// For now, the CRI shim redirects the streaming requests to the
-			// kubelet, which handles the requests using DockerService..
-			klet.criHandler = ds
-
-			// The unix socket for kubelet <-> dockershim communication.
-			glog.V(5).Infof("RemoteRuntimeEndpoint: %q, RemoteImageEndpoint: %q",
-				remoteRuntimeEndpoint,
-				remoteImageEndpoint)
-			glog.V(2).Infof("Starting the GRPC server for the docker CRI shim.")
-			server := dockerremote.NewDockerServer(remoteRuntimeEndpoint, ds)
-			if err := server.Start(); err != nil {
-				return nil, err
-			}
-
-			// Create dockerLegacyService when the logging driver is not supported.
-			supported, err := dockershim.IsCRISupportedLogDriver(kubeDeps.DockerClient)
-			if err != nil {
-				return nil, err
-			}
-			if !supported {
-				klet.dockerLegacyService = dockershim.NewDockerLegacyService(kubeDeps.DockerClient)
-				legacyLogProvider = dockershim.NewLegacyLogProvider(klet.dockerLegacyService)
-			}
-		case kubetypes.RemoteContainerRuntime:
-			// No-op.
-			break
-		default:
-			return nil, fmt.Errorf("unsupported CRI runtime: %q", kubeCfg.ContainerRuntime)
-		}
-		runtimeService, imageService, err := getRuntimeAndImageServices(remoteRuntimeEndpoint, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout)
+	switch kubeCfg.ContainerRuntime {
+	case kubetypes.DockerContainerRuntime:
+		// Create and start the CRI shim running as a grpc server.
+		streamingConfig := getStreamingConfig(kubeCfg, kubeDeps)
+		ds, err := dockershim.NewDockerService(kubeDeps.DockerClient, crOptions.PodSandboxImage, streamingConfig,
+			&pluginSettings, kubeCfg.RuntimeCgroups, kubeCfg.CgroupDriver, crOptions.DockershimRootDirectory,
+			crOptions.DockerDisableSharedPID)
 		if err != nil {
 			return nil, err
 		}
-		klet.runtimeService = runtimeService
-		runtime, err := kuberuntime.NewKubeGenericRuntimeManager(
-			kubecontainer.FilterEventRecorder(kubeDeps.Recorder),
-			klet.livenessManager,
-			kubeCfg.SeccompProfileRoot,
-			containerRefManager,
-			machineInfo,
-			klet,
-			kubeDeps.OSInterface,
-			klet,
-			httpClient,
-			imageBackOff,
-			kubeCfg.SerializeImagePulls,
-			float32(kubeCfg.RegistryPullQPS),
-			int(kubeCfg.RegistryBurst),
-			kubeCfg.CPUCFSQuota,
-			runtimeService,
-			imageService,
-			kubeDeps.ContainerManager.InternalContainerLifecycle(),
-			legacyLogProvider,
-		)
-		if err != nil {
+		if err := ds.Start(); err != nil {
 			return nil, err
 		}
-		klet.containerRuntime = runtime
-		klet.runner = runtime
+		// For now, the CRI shim redirects the streaming requests to the
+		// kubelet, which handles the requests using DockerService..
+		klet.criHandler = ds
 
-		// CRI integrations should get container metrics via CRI. Docker
-		// uses the built-in cadvisor to gather such metrics on Linux for
-		// historical reasons.
-		// cri-o relies on cadvisor as a temporary workaround. The code should
-		// be removed. Related issue:
-		// https://github.com/kubernetes/kubernetes/issues/51798
-		if (kubeCfg.ContainerRuntime == kubetypes.DockerContainerRuntime &&
-			goruntime.GOOS == "linux") || remoteRuntimeEndpoint == "/var/run/crio.sock" {
-			klet.StatsProvider = stats.NewCadvisorStatsProvider(
-				klet.cadvisor,
-				klet.resourceAnalyzer,
-				klet.podManager,
-				klet.runtimeCache,
-				klet.containerRuntime)
-		} else {
-			klet.StatsProvider = stats.NewCRIStatsProvider(
-				klet.cadvisor,
-				klet.resourceAnalyzer,
-				klet.podManager,
-				klet.runtimeCache,
-				runtimeService,
-				imageService)
+		// The unix socket for kubelet <-> dockershim communication.
+		glog.V(5).Infof("RemoteRuntimeEndpoint: %q, RemoteImageEndpoint: %q",
+			remoteRuntimeEndpoint,
+			remoteImageEndpoint)
+		glog.V(2).Infof("Starting the GRPC server for the docker CRI shim.")
+		server := dockerremote.NewDockerServer(remoteRuntimeEndpoint, ds)
+		if err := server.Start(); err != nil {
+			return nil, err
 		}
-	} else {
-		// rkt uses the legacy, non-CRI, integration. Configure it the old way.
-		// TODO: Include hairpin mode settings in rkt?
-		conf := &rkt.Config{
-			Path:            crOptions.RktPath,
-			Stage1Image:     crOptions.RktStage1Image,
-			InsecureOptions: "image,ondisk",
-		}
-		runtime, err := rkt.New(
-			crOptions.RktAPIEndpoint,
-			conf,
-			klet,
-			kubeDeps.Recorder,
-			containerRefManager,
-			klet,
-			klet.livenessManager,
-			httpClient,
-			klet.networkPlugin,
-			hairpinMode == kubeletconfiginternal.HairpinVeth,
-			utilexec.New(),
-			kubecontainer.RealOS{},
-			imageBackOff,
-			kubeCfg.SerializeImagePulls,
-			float32(kubeCfg.RegistryPullQPS),
-			int(kubeCfg.RegistryBurst),
-			kubeCfg.RuntimeRequestTimeout.Duration,
-		)
+
+		// Create dockerLegacyService when the logging driver is not supported.
+		supported, err := dockershim.IsCRISupportedLogDriver(kubeDeps.DockerClient)
 		if err != nil {
 			return nil, err
 		}
-		klet.containerRuntime = runtime
-		klet.runner = kubecontainer.DirectStreamingRunner(runtime)
+		if !supported {
+			klet.dockerLegacyService = dockershim.NewDockerLegacyService(kubeDeps.DockerClient)
+			legacyLogProvider = dockershim.NewLegacyLogProvider(klet.dockerLegacyService)
+		}
+	case kubetypes.RemoteContainerRuntime:
+		// No-op.
+		break
+	default:
+		return nil, fmt.Errorf("unsupported CRI runtime: %q", kubeCfg.ContainerRuntime)
+	}
+	runtimeService, imageService, err := getRuntimeAndImageServices(remoteRuntimeEndpoint, remoteImageEndpoint, kubeCfg.RuntimeRequestTimeout)
+	if err != nil {
+		return nil, err
+	}
+	klet.runtimeService = runtimeService
+	runtime, err := kuberuntime.NewKubeGenericRuntimeManager(
+		kubecontainer.FilterEventRecorder(kubeDeps.Recorder),
+		klet.livenessManager,
+		kubeCfg.SeccompProfileRoot,
+		containerRefManager,
+		machineInfo,
+		klet,
+		kubeDeps.OSInterface,
+		klet,
+		httpClient,
+		imageBackOff,
+		kubeCfg.SerializeImagePulls,
+		float32(kubeCfg.RegistryPullQPS),
+		int(kubeCfg.RegistryBurst),
+		kubeCfg.CPUCFSQuota,
+		runtimeService,
+		imageService,
+		kubeDeps.ContainerManager.InternalContainerLifecycle(),
+		legacyLogProvider,
+	)
+	if err != nil {
+		return nil, err
+	}
+	klet.containerRuntime = runtime
+	klet.runner = runtime
+
+	// CRI integrations should get container metrics via CRI. Docker
+	// uses the built-in cadvisor to gather such metrics on Linux for
+	// historical reasons.
+	// cri-o relies on cadvisor as a temporary workaround. The code should
+	// be removed. Related issue:
+	// https://github.com/kubernetes/kubernetes/issues/51798
+	if (kubeCfg.ContainerRuntime == kubetypes.DockerContainerRuntime &&
+		goruntime.GOOS == "linux") || remoteRuntimeEndpoint == "/var/run/crio.sock" {
 		klet.StatsProvider = stats.NewCadvisorStatsProvider(
 			klet.cadvisor,
 			klet.resourceAnalyzer,
 			klet.podManager,
 			klet.runtimeCache,
 			klet.containerRuntime)
+	} else {
+		klet.StatsProvider = stats.NewCRIStatsProvider(
+			klet.cadvisor,
+			klet.resourceAnalyzer,
+			klet.podManager,
+			klet.runtimeCache,
+			runtimeService,
+			imageService)
 	}
 
 	klet.pleg = pleg.NewGenericPLEG(klet.containerRuntime, plegChannelCapacity, plegRelistPeriod, klet.podCache, clock.RealClock{})
@@ -2124,34 +2082,30 @@ func (kl *Kubelet) updateRuntimeUp() {
 		glog.Errorf("Container runtime sanity check failed: %v", err)
 		return
 	}
-	// rkt uses the legacy, non-CRI integration. Don't check the runtime
-	// conditions for it.
-	if kl.kubeletConfiguration.ContainerRuntime != kubetypes.RktContainerRuntime {
-		if s == nil {
-			glog.Errorf("Container runtime status is nil")
-			return
-		}
-		// Periodically log the whole runtime status for debugging.
-		// TODO(random-liu): Consider to send node event when optional
-		// condition is unmet.
-		glog.V(4).Infof("Container runtime status: %v", s)
-		networkReady := s.GetRuntimeCondition(kubecontainer.NetworkReady)
-		if networkReady == nil || !networkReady.Status {
-			glog.Errorf("Container runtime network not ready: %v", networkReady)
-			kl.runtimeState.setNetworkState(fmt.Errorf("runtime network not ready: %v", networkReady))
-		} else {
-			// Set nil if the container runtime network is ready.
-			kl.runtimeState.setNetworkState(nil)
-		}
-		// TODO(random-liu): Add runtime error in runtimeState, and update it
-		// when runtime is not ready, so that the information in RuntimeReady
-		// condition will be propagated to NodeReady condition.
-		runtimeReady := s.GetRuntimeCondition(kubecontainer.RuntimeReady)
-		// If RuntimeReady is not set or is false, report an error.
-		if runtimeReady == nil || !runtimeReady.Status {
-			glog.Errorf("Container runtime not ready: %v", runtimeReady)
-			return
-		}
+	if s == nil {
+		glog.Errorf("Container runtime status is nil")
+		return
+	}
+	// Periodically log the whole runtime status for debugging.
+	// TODO(random-liu): Consider to send node event when optional
+	// condition is unmet.
+	glog.V(4).Infof("Container runtime status: %v", s)
+	networkReady := s.GetRuntimeCondition(kubecontainer.NetworkReady)
+	if networkReady == nil || !networkReady.Status {
+		glog.Errorf("Container runtime network not ready: %v", networkReady)
+		kl.runtimeState.setNetworkState(fmt.Errorf("runtime network not ready: %v", networkReady))
+	} else {
+		// Set nil if the container runtime network is ready.
+		kl.runtimeState.setNetworkState(nil)
+	}
+	// TODO(random-liu): Add runtime error in runtimeState, and update it
+	// when runtime is not ready, so that the information in RuntimeReady
+	// condition will be propagated to NodeReady condition.
+	runtimeReady := s.GetRuntimeCondition(kubecontainer.RuntimeReady)
+	// If RuntimeReady is not set or is false, report an error.
+	if runtimeReady == nil || !runtimeReady.Status {
+		glog.Errorf("Container runtime not ready: %v", runtimeReady)
+		return
 	}
 	kl.oneTimeInitializer.Do(kl.initializeRuntimeDependentModules)
 	kl.runtimeState.setRuntimeSync(kl.clock.Now())
